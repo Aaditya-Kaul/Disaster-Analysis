@@ -1,0 +1,304 @@
+---
+title: "Group18"
+author: "Aaditya Kaul"
+date: "2023-11-09"
+---
+
+```{r setup, include = FALSE, purl = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+```{r}
+setwd("/Users/Aaditya Kaul/OneDrive/Desktop/Applications/University of Southampton/Study/MATH 6183/America")
+```
+
+```{r}
+# libraries
+library(dplyr) # for select function
+library(tidyr)  # for something i forgot
+library(ggplot2) # for plotting
+library(car) # This library contains the vif function
+library(glmnet) # for coffee regression
+library(caret) # for spliting
+library(C50) # for c50 desion tree
+library(reshape2)  # for melt
+```
+
+
+```{r}
+
+mexico <- read.csv("mexico.csv",header=TRUE,na.strings=c(""))
+# Strip leading/trailing spaces from column names
+colnames(mexico) <- gsub("^\\s+|\\s+$", "", colnames(mexico))
+
+
+
+
+```
+
+<!-- Data PreProcessing: Missing Values, Duplicate Values, reducing dimensions  -->
+
+```{r}
+print("Total Missing Values: ")
+print(paste("Mexico: ",sum(is.na(mexico))))
+```
+
+```{r}
+# mexico missing values          
+mexico <- na.omit(mexico, cols = c('Event'))
+```
+
+
+```{r}
+
+print("Total Missing Values: ")
+print(paste("Mexico: ",sum(is.na(mexico))))
+
+```
+
+```{r}
+print("Total Duplicate values")
+print(paste("Mexico: ", sum(duplicated(mexico))))
+
+
+```
+
+
+```{r}
+library(dplyr)
+mexico$Houses.Ruined <-mexico$Houses.Destroyed + mexico$Houses.Damaged
+mexico$Affected <-mexico$Directly.affected + mexico$Indirectly.Affected
+
+# while working we observed that there were an unexpected error 19 values for turkey became na because of high value so we introduce a new value
+# Example threshold to differentiate between large and small values
+threshold <- 1e9  # Adjust this threshold as needed based on your data characteristics
+
+# Initialize an empty vector to store the calculated values
+mexico$Monetary.LossUSD <- numeric(nrow(mexico))
+
+# Loop through each row and perform the calculation based on value size
+for (i in 1:nrow(mexico)) {
+  if (mexico$Losses..Local[i] >= threshold) {
+    # For large values, scale down before calculation
+    mexico$Monetary.LossUSD[i] <- mexico$Losses..USD[i] + (mexico$Losses..Local[i] / threshold) * 0.060
+  } else {
+    # For small values, perform the calculation without scaling
+    mexico$Monetary.LossUSD[i] <- mexico$Losses..USD[i] + mexico$Losses..Local[i] * 0.060
+  }
+}
+
+# Convert to integer (if necessary)
+mexico$Monetary.LossUSD <- as.integer(mexico$Monetary.LossUSD)
+
+mexico = select(mexico, -5:-10)
+head(mexico)
+
+
+
+# Two outliers i.e 1992 explosion and 2002 rain has na values was 10 billion so for our dataset we will set it at max of our dataset
+max_value <- max(mexico$Monetary.LossUSD, na.rm = TRUE)
+
+# Replace NA values with the maximum non-NA value
+mexico$Monetary.LossUSD[is.na(mexico$Monetary.LossUSD)] <- max_value
+
+summary(mexico)
+```
+
+
+```{r}
+mean_deaths <- mean(mexico$Deaths)
+calculate_severity <- function(deaths, mean_deaths)
+  {
+  if (deaths > mean_deaths) 
+    {
+    severity <- 1 + 9 * ((deaths - mean_deaths) / max(mexico$Deaths - mean_deaths, na.rm = TRUE))
+  } 
+  else if (deaths < mean_deaths) {
+    severity <- 1 + 9 * ((deaths - mean_deaths) / min(mexico$Deaths - mean_deaths, na.rm = TRUE))
+  } else {
+    severity <- 5
+  }
+  return(round(severity))
+}
+
+# Apply the function to create the Event_Severity column
+mexico$Event_Severity <- sapply(mexico$Deaths, calculate_severity, mean_deaths)
+
+head(mexico)
+
+```
+
+
+```{r}
+write.csv(mexico, file = "mexico_cleaned.csv", row.names = FALSE)
+
+library(caret)
+
+mexico_c <- read.csv("mexico_cleaned.csv",header=TRUE)
+```
+
+# Training and Testing:
+```{r}
+set.seed(123)
+
+# Create a vector of indices indicating the split
+split_indices <- createDataPartition(mexico_c$Year, p = 0.7, list = FALSE)
+
+# Create training and testing sets
+training_data_mexico <- mexico_c[split_indices, ]
+testing_data_mexico <- mexico_c[-split_indices, ]
+
+```
+
+```{r}
+mexico_no_event <- mexico_c[, !names(mexico_c) %in% c("Event")]
+
+# Scale the data
+scaled_data <- scale(mexico_no_event)
+
+# Perform PCA
+pca_result <- prcomp(scaled_data, center = TRUE, scale. = TRUE)
+
+# Summary of PCA results
+summary(pca_result)
+```
+
+```{r}
+# Calculate total for each factor
+mexico_c<- mexico_c %>%
+  mutate(Total = DataCards + Deaths + Houses.Ruined + Affected)
+
+# Calculate percentages within each factor for each event
+ mexico_c_perc <- mexico_c %>%
+  mutate(
+    DataCards_perc = DataCards / Total,
+    Deaths_perc = Deaths / Total,
+    Houses_Ruined_perc = Houses.Ruined / Total,
+    Affected_perc = Affected / Total
+  ) %>%
+  select(Event, DataCards_perc, Deaths_perc, Houses_Ruined_perc, Affected_perc)
+
+# Reshape the data into long format
+ mexico_c_long <-  mexico_c_perc %>%
+  pivot_longer(cols = -Event, names_to = "Factor", values_to = "Percentage")
+
+# Create a pie chart using ggplot2
+ggplot( mexico_c_long, aes(x = "", y = Percentage, fill = Event)) +
+  geom_bar(stat = "identity", width = 1) +
+  facet_wrap(~Factor) +  # Separate pie for each factor
+  coord_polar(theta = "y") +
+  theme_minimal() +
+  ggtitle("Event Distribution by Factor (Percentage)")
+```
+
+```{r}
+# List of y variables
+y_variables <- c("DataCards", "Deaths", "Monetary.LossUSD", "Event_Severity", "Houses.Ruined", "Affected")
+
+# Loop through each y variable
+for (y_var in y_variables) {
+  # Create formula for the regression model
+  formula <- as.formula(paste("mexico_c$", y_var, "~mexico_c$DataCards + mexico_c$Deaths + mexico_c$Monetary.LossUSD + mexico_c$Event_Severity + mexico_c$Houses.Ruined + mexico_c$Affected"))
+
+  # Fit linear regression model
+  model <- lm(formula, data = mexico_c)
+
+  # Check for multicollinearity using VIF
+  vif_result <- car::vif(model)
+
+  # Print VIF results for each y variable
+  cat("VIF results for", y_var, ":\n")
+  print(vif_result)
+  cat("\n")
+}
+
+
+```
+
+```{r}
+# Assuming 'Datacards' is response variable
+y <- training_data_mexico$DataCards
+X <- subset(training_data_mexico, select = -c(Event))  # Selecting features not to include
+
+# Setting the data into training and testing sets
+train_data <- training_data_mexico
+test_data <-  testing_data_mexico
+
+# Creating matrices for glmnet
+X_train <- as.matrix(subset(train_data, select =  -c(Event))) 
+y_train <- train_data$DataCards
+X_test <- as.matrix(subset(test_data, select =  -c(Event)))
+y_test <- test_data$DataCards
+
+# Standardizing the predictors
+X_train_std <- scale(X_train)
+X_test_std <- scale(X_test)
+
+# Fit the elastic net model
+enet_model_mexico <- cv.glmnet(X_train_std, y_train, alpha = 0.5)  # alpha = 0.5 indicates the elastic net
+
+# Making predictions
+y_pred <- predict(enet_model_mexico, newx = X_test_std)
+
+# Evaluating the model
+mse <- mean((y_pred - y_test)^2)
+print(paste("Mean Squared Error:", mse))
+# Assessing model accuracy
+rsquared <- cor(y_pred, y_test)^2
+print(paste("R-squared:", rsquared))
+```
+
+```{r}
+plot(enet_model_mexico)
+plot(y_test, y_pred, main = "Actual vs Predicted", xlab = "Actual", ylab = "Predicted")
+abline(0, 1, col = "red")  # Adding a line for perfect prediction
+```
+
+```{r}
+#View the distribution of the newly created classification
+#table(country_c$Severity_Class)
+
+mexico_c$Severity_Class <- ifelse(mexico_c$Event_Severity >= 5, "High Severity", "Low Severity")
+
+# Define the quartiles of the 'Year' column to split into temporal categories
+year_quantiles <- quantile(mexico_c$Year, probs = c(0, 1/3, 2/3, 1))
+
+# Classify based on quartiles of 'Year'
+mexico_c$Temporal_Class <- cut(mexico_c$Year,
+                                  breaks = year_quantiles,
+                                  labels = c("Early Period", "Mid Period", "Recent Period"),
+                                  include.lowest = TRUE)
+
+mexico_c$Combined_Impact <- rowSums(subset(mexico_c, select =  c(Deaths, Houses.Ruined, Affected, Monetary.LossUSD)))
+
+# Calculate quartiles of combined impact
+quantiles <- quantile(mexico_c$Combined_Impact, probs = c(0, 0.25, 0.75, 1))
+
+# Classify based on quartiles
+mexico_c$Impact_Class <- cut(mexico_c$Combined_Impact,
+                                breaks = quantiles,
+                                labels = c("Minimal Impact", "Moderate Impact", "Severe Impact"),
+                                include.lowest = TRUE)
+
+
+#Cluster on the basis of DataCards
+kmeans_result <- kmeans(mexico_c$DataCards, centers = 4)
+mexico_c$cluster_id <- factor(kmeans_result$cluster)
+
+# Get the mean values of DataCards for each cluster
+cluster_means <- aggregate(mexico_c$DataCards, by = list(mexico_c$cluster_id), FUN = mean)
+
+# Sort the clusters by mean DataCards value
+sorted_clusters <- cluster_means[order(cluster_means$x),]
+
+# Create a mapping of new labels based on the sorted order of clusters
+label_mapping <- c("Less DataCards", "Moderately Low DataCards", "Moderately High DataCards", "Most DataCards")
+
+# Assign new labels based on the sorted order
+mexico_c$cluster_label <- label_mapping[match(mexico_c$cluster_id, sorted_clusters$Group.1)]
+
+```
+
